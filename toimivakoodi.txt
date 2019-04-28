@@ -1,0 +1,162 @@
+
+ * GccApplication2.c
+ *
+ * Created: 3.5.2018 15:37:07
+ *  Author: tapioj
+ */ 
+
+#ifndef F_CPU
+#define F_CPU 8000000UL
+#endif
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
+#include <avr/cpufunc.h>
+
+
+
+ #define BAUD 9600
+ #define BAUDRATE    (F_CPU/(16UL*BAUD)-1)
+ 
+ typedef enum { false, true } bool;
+ //Vaiheet:
+ 
+ // vastaanotetaan luku (0-5) sarjav‰yl‰n kautta
+ // asetetaan oikea j‰nnite PWM:n avulla tiettyyn pinniin
+ 
+ // arvo duty_cycle  osuus 256:sta   8-bit binary
+ // 0    0           0               00000000
+ // 1    20          51              00110011
+ // 2    40          102             01100110
+ // 3    60          153             10011001
+ // 4    80          204             11001100
+ // 5    100         255             11111111
+ 
+ // mitataan j‰nnitett‰ AD-muuntimen avulla ja pidet‰‰n se vakaana muuttamalla PWM-arvoa kuorman muuttuessa
+ 
+ // L‰hetet‰‰n PWM-arvo sarjav‰yl‰n kautta tietokoneelle
+ 
+ // napin painallus aiheuttaa keskeytyksen, jolloin ulostuloj‰nnite asetetaan nollaan (j‰rjestelm‰ seisahtuu)
+ // uusi painallus jatkaa toimintaa siit‰ mihin j‰‰tiin
+ 
+ //suoraan harkka 7 mallivastauksesta
+ void setup_pwm(uint8_t duty_cycle){
+	 //init D5 as output
+	 DDRD |=(1<<PD5);
+	 PORTD|=(1<<PD5);
+	 //init OCR0B as compare match
+	 TCCR0A|=(1<<COM0B1|1<<WGM00|1<<WGM01);
+	 //PWM frequency 250 kHz 
+	 TCCR0B |=(1<<CS00)|(1<<CS01);
+	 // set pwm duty cycle
+	 OCR0B = duty_cycle;
+ }
+ 
+  ///UARTia varten koodinp‰tk‰
+  void init_UART(unsigned short uValue  ){
+	  // setting the baud rate  based on the datasheet
+	  UBRR0H =(BAUDRATE>>8);//(unsigned char)  ( uValue>> 8);  // 0x00
+	  UBRR0L = BAUDRATE;//(unsigned char) uValue;  // 0x0C
+	  // enabling TX & RX
+	  UCSR0B = (1<<RXEN0)|(1<<TXEN0);//enable receiver and transmitter
+	  //UCSR0A = (1<<UDRE0)|(1<<U2X0);
+	  UCSR0C =  (1 << UCSZ01) | (1 << UCSZ00);    // Set frame: 8data, 1 stop
+
+  }
+volatile uint8_t dPortInput;		// read contents of the D port
+volatile uint16_t edgeCounter = 0;	// count of the rising edges of the signal in D0 
+uint8_t d0Input = 0;		// state of D0
+uint8_t previousState = 0;  // previous state of D0
+
+ISR(PCINT2_vect)							// Pin change interrupt flag register PCIFR (0x3b)
+{
+	d0Input = PIND & (1<<PD0);				// read port D pin 0 (mask all other bits)
+	if(previousState==0) {					// if previous state was 0 then the change must be a rising edge
+		// action
+		dPortInput = PIND;					// read port D to the buffer variable
+		edgeCounter++;						// count rising edges
+	}
+	previousState=d0Input;
+}
+uint8_t voltage = 0;
+ISR(USART_RX_vect){
+	voltage = UDR0;
+}
+
+//   unsigned char UART_Receive( void )
+//   {
+// 	  /* Wait for data to be received */
+// 	  while ( !(UCSR0A & (1<<RXC0)) )
+// 	  ;
+// 	  /* Get and return received data from buffer */
+// 	  return UDR0;
+//   }
+  
+  void UART_Transmit( unsigned char data )
+  {
+	  /* Wait for empty transmit buffer */
+	  while ( !( UCSR0A & (1<<UDRE0)) )
+	  ;
+	  /* Put data into buffer, sends the data */
+	  UDR0 = data;
+  }
+
+bool program_running = true;
+
+int main(void)
+{
+	uint8_t duty_cycle = 0b00000000;
+	
+	setup_pwm(duty_cycle);
+	/*DDRB |= _BV(DDB5);*/
+    while(program_running)
+    {
+		//TODO:: Please write your application code 
+	    switch (voltage){
+			case 0:
+				duty_cycle = 0b00000000;
+				break;
+			case 1:
+				duty_cycle = 0b00110011;
+				break;
+			case 2:
+				duty_cycle = 0b01100110;
+				break;
+			case 3:
+				duty_cycle = 0b10011001;
+				break;
+			case 4:
+				duty_cycle = 0b11001100;
+				break;
+			case 5:
+				duty_cycle = 0b11111111;
+				break;
+			//etc case 1 2 3 4 and 5
+			OCR0B = duty_cycle;
+		}
+		
+// 		PORTB ^= _BV(PD5);
+// 		_delay_ms(500);
+// 		setup_pwm(PD5);
+// 		init_UART(MYUBRR);
+// 		DDRD |= (1<< PD7);
+// 		for(;;){
+// 			PORTD ^= (1<< PD7);
+// 			UART_Transmit('x');
+// 			UART_Transmit('l');
+// 			//_delay_ms(1000);
+}
+		
+	return 0;
+		
+		
+    
+}
+
+
+ 
+ 
