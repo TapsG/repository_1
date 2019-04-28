@@ -1,0 +1,340 @@
+/*
+ * GccApplication2.c
+ *
+ * Created: 3.4.2019 14.27.12
+ * Author : tapioj
+ */ 
+#ifndef F_CPU
+#define F_CPU 16000000UL
+#endif
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
+#include <avr/cpufunc.h>
+
+
+
+#define BAUD 9600
+#define BAUDRATE    (F_CPU/(16UL*BAUD)-1)
+
+typedef enum { false, true } bool;
+
+//Vaiheet:
+
+// vastaanotetaan luku (0-5) sarjaväylän kautta
+// asetetaan oikea jännite PWM:n avulla tiettyyn pinniin
+
+// arvo duty_cycle  osuus 256:sta   8-bit binary
+// 0    0           0               00000000
+// 1    20          51              00110011
+// 2    40          102             01100110
+// 3    60          153             10011001
+// 4    80          204             11001100
+// 5    100         255             11111111
+
+// mitataan jännitettä AD-muuntimen avulla ja pidetään se vakaana muuttamalla PWM-arvoa kuorman muuttuessa
+
+// Lähetetään PWM-arvo sarjaväylän kautta tietokoneelle
+
+// napin painallus aiheuttaa keskeytyksen, jolloin ulostulojännite asetetaan nollaan (järjestelmä seisahtuu)
+// uusi painallus jatkaa toimintaa siitä mihin jäätiin
+
+
+
+//alla oleva kommentoitu ADC- koodipätkä ei toiminut tässä työssä jostain syystä
+// void initADC(void)
+// {
+// 	// init AD channel 0
+// 	// disable channel 0 input buffer
+// 	DIDR0 |= 0x01;
+// 	// write 1 to corresponding output pin
+// 	PORTC |= 0x01;
+// 
+// 	// choose channel 0, ADMUX[MUX3:MUX0] -> 0b0000
+// 	// default is OK
+// 
+// 	// choose internal Vcc reference, ADMUX[REFS1:REFS0] -> 0b01
+// 	ADMUX |= (1<<REFS0);
+// 
+// 	// use only high byte ADCSRA[ADLAR] -> 1
+// 	// ADMUX |= (1<<ADLAR);
+// 
+// 	// clock prescaler 128, ADCSRA [ADPS 2:0] -> 0b111
+// 	ADCSRA |= (1<<ADPS2) | (1<<ADPS1) | (1<<ADPS0);
+// 
+// 	// enable AD-converter in Power Reduction Register, PRR[PRADC] -> 0
+// 	PRR &= ~(1<<PRADC);
+// 	// enable AD-converter in ADCSRA
+// 	ADCSRA |= (1<<ADEN);
+// }
+// 
+// uint8_t readADC8(void)
+// {
+// 	uint16_t vtmp;
+// 	// start conversion ADCSRA[ADSC] -> 1
+// 	ADCSRA |= (1<<ADSC);
+// 
+// 	// poll ADCSRA[ADSC] -> 1
+// 	while (ADCSRA & (1<<ADSC)) ;
+// 	
+// 	// read the 8 low order bits
+// 	vtmp = ADCL;
+// 	// read the 2 high order bits and shift them up
+// 	return vtmp + ((uint8_t)ADCH<<8);
+// }
+/// Tells to delay library that CPU clock is 1 MHz
+
+// Defines not necessary but helps remembering pins and ports etc.
+#define ADC_PORT PORTC
+#define ADC_DDR DDRC
+#define ADC_POT_PIN PC1
+
+
+
+void initADC() {
+// ADC1 pin = input
+	ADC_DDR &= ~(1 << ADC_POT_PIN);
+// Clockdiv = 64 -> 15,6kHz @ 1 MHz Fcpu
+	ADCSRA |= (1 << ADPS2)|(1 << ADPS1);
+// Enable ADC
+	ADCSRA |= (1 << ADEN);
+}
+uint8_t read_adc(uint8_t adc_channel) {
+/*   ADMUX: [REFS1][REFS0][ADLAR][-][MUX3][MUX2][MUX1][MUX0];*/
+// Select AVcc as voltage reference with capacitor connected to AREF pin,
+// Left adjust the result and select ADC channel.
+//
+// For ex. b01100000 | 0b00000001 --> 0b01100001 (OR operation).
+	ADMUX = 0b01100000 | adc_channel;
+// Start conversion
+	ADCSRA |= (1<<ADSC);
+// Wait for conversion to finish
+	while(!(ADCSRA & (1 << ADIF)));
+// Return ADC value as 8-bit integer
+// (ADLAR makes converting 10-bit ADC value to 8-bit easier)
+	return ADCH;
+}
+
+void setup_pwm(uint8_t duty_cycle){
+	//init D5 as output
+	DDRD |=(1<<PD5);
+	PORTD|=(1<<PD5);
+	//init OCR0B as compare match
+	TCCR0A|=(1<<COM0B1|1<<WGM00|1<<WGM01);
+	//PWM frequency 250 kHz
+/*	TCCR0B |=(1<<CS00)|(1<<CS01);*/
+	TCCR0B |=(1<<CS00);
+	// set pwm duty cycle
+	OCR0B = duty_cycle;
+}
+
+///UARTia varten koodinpätkä
+void init_UART(unsigned short uValue  ){
+	// setting the baud rate  based on the datasheet
+	UBRR0H =(BAUDRATE>>8);//(unsigned char)  ( uValue>> 8);  // 0x00
+	UBRR0L = BAUDRATE;//(unsigned char) uValue;  // 0x0C
+	// enabling TX & RX
+	UCSR0B = (1<<RXEN0)|(1<<TXEN0) | (1 << RXCIE0);//enable receiver and transmitter
+	//UCSR0A = (1<<UDRE0)|(1<<U2X0);
+	UCSR0C =  (1 << UCSZ01) | (1 << UCSZ00);    // Set frame: 8data, 1 stop
+
+}
+volatile uint8_t dPortInput;		// read contents of the D port
+volatile uint16_t edgeCounter = 0;	// count of the rising edges of the signal in D0
+volatile uint8_t d0Input = 0;		// state of D0
+volatile uint8_t previousState = 0;  // previous state of D0
+
+volatile uint8_t program_running = 1;
+volatile uint8_t voltage =0 ;
+volatile uint8_t duty_cycle = 0b00000000;
+
+void init_system(void){
+	DDRB |= (1<<PB5);
+	DDRD &= ~(1<<PD7);
+	PORTD |= (1<<PD7);
+	PCICR |=(1<<PCIE2);
+	PCMSK2 |= (1<<PCINT23);
+}
+ISR(PCINT2_vect)							// Pin change interrupt flag register PCIFR (0x3b)
+{
+	d0Input = PIND & (1<<PD7);				// read port D pin 0 (mask all other bits)
+	if(previousState==128) {					// if previous state was 0 then the change must be a rising edge
+		// action
+// 		dPortInput = PIND;					// read port D to the buffer variable
+// 		edgeCounter++;						// count rising edges
+	if(program_running==1){
+		program_running= 0;
+	}
+	else{
+		program_running = 1;
+// 		TCCR0B |= (1<<CS01);
+ 		OCR0B = duty_cycle;
+	}
+	}
+	previousState=d0Input;
+}
+
+ISR(USART_RX_vect){
+		voltage = UDR0 - '0';
+	}
+
+//   unsigned char UART_Receive( void )
+//   {
+// 	  /* Wait for data to be received */
+// 	  while ( !(UCSR0A & (1<<RXC0)) )
+// 	  ;
+// 	  /* Get and return received data from buffer */
+// 	  return UDR0;
+//   }
+
+
+void UART_Transmit(unsigned char data) //unsigned char data
+{
+	/* Wait for empty transmit buffer */
+	while ( !( UCSR0A & (1<<UDRE0)) )
+	;
+	/* Put data into buffer, sends the data */
+	UDR0 = data;
+}
+
+void uart_transmit_uint8_t(uint8_t number){
+	char buffer[4];
+	sprintf(buffer,"%i",number);
+
+	for(int i=0;i<3;i++){
+		UART_Transmit(buffer[i]);
+	}
+}
+
+
+
+
+
+
+int main(void)
+{
+	
+	/*PORTB =PORTB & ~(1<<PB5);*/
+	init_UART(BAUD);
+	initADC();
+	setup_pwm(duty_cycle);
+	init_system();
+	sei();
+	/*DDRB |= _BV(DDB5);*/
+ 	int16_t error = 0;
+ 	int16_t previous_error = 0;
+  	int16_t integral = 0;
+  	int16_t derivative = 0;
+ 	int16_t output = 0;
+ 	int16_t measured_voltage = 0;
+	while(1){
+		if(program_running == 1){
+		UART_Transmit(voltage+'0');
+		UART_Transmit(0x3A);
+		UART_Transmit(0X20);
+		uart_transmit_uint8_t(duty_cycle);
+		UART_Transmit(0x3A);
+		UART_Transmit(0X20);
+		/*uart_transmit_uint8_t(measured_voltage);*/
+// 		UART_Transmit('\n'); //puttyä varten
+// 		UART_Transmit('\r');
+		//TODO:: Please write your application code
+		switch (voltage){
+						case 0:
+							duty_cycle = 0b00000000;
+							
+							break;
+						case 1:
+							duty_cycle = 0b00110011;
+							
+							break;
+						case 2:
+							duty_cycle = 0b01100110;
+							
+							break;
+						case 3:
+							duty_cycle = 0b10011001;
+							
+							break;
+						case 4:
+							duty_cycle = 0b11001100;
+							
+							break;
+						case 5:
+							duty_cycle = 0b11111111;
+							
+							break;
+						default:
+						 duty_cycle = 0;
+						
+		}
+		
+		
+		
+				/*PORTB ^= _BV(PD5);*/
+		// 		_delay_ms(500);
+		// 		setup_pwm(PD5);
+		// 		init_UART(MYUBRR);
+		// 		DDRD |= (1<< PD7);   
+		// 		for(;;){
+		// 			PORTD ^= (1<< PD7);
+		// 			UART_Transmit('x');
+		// 			UART_Transmit('l');
+		// 			//_delay_ms(1000);
+// 		
+ /*This file has been prepared for Doxygen automatic documentation generation.*/
+
+
+// 				#define DT 2//ms
+// 				#define KP 0.5//P Factor      //Versionhallinnan tarve olisi kriittinen Atmel studio 7:ssa
+// 				#define KI 0.5// I Factor
+// 				#define KD 0.25 // D Factor
+// 				
+// 				#define DT 1
+				#define KP 8//P Factor
+ 				#define KI 1 //I Factor
+ 				#define KD 0// D Factor
+				
+
+// 				
+// 	
+//  				
+				measured_voltage = read_adc(0);
+				error = duty_cycle - measured_voltage;
+ 				integral = integral + (error);
+  				derivative = (error - previous_error);
+				output = (KP*error+ +KI*integral + KD*derivative)/10; 
+				if (output < 0){
+					output = 0;
+				}
+				else if (255 < output){
+					output = 255;
+				}
+				OCR0B = output; /*duty_cycle;*/
+				previous_error = error;
+				_delay_ms(0);//
+				uart_transmit_uint8_t(measured_voltage);
+				UART_Transmit(0x3A);
+				UART_Transmit(0X20);
+				uart_transmit_uint8_t(output);
+// // 
+				UART_Transmit('\n'); //puttyä varten
+				UART_Transmit('\r');
+// 				
+				}
+		else{
+			OCR0B=0;
+		}
+	}
+
+	return 0;
+	
+	
+	
+}
+
+
